@@ -1,0 +1,196 @@
+---
+title: "assignment3_Jose_Quispe"
+author: "Jose Carlos Quispe, Antonio Coelles, Esteban Sepulveda"
+date: "30 de marzo de 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Assignment 3: Text Classification
+Students:
+- Antonio Coelles
+- Esteban Sepulveda
+- José Carlos Quispe
+
+The specific problem we are going to solve is based on a twitter dataset including tweets about US airlines. It includes Twitter data that was scraped from February of 2015 and classified into positive, negative, and neutral, followed by a categorization of the negative reasons (such as "late flight" or "rude service").  Using this dataset we have to identify the sentiment of a given tweet (positive, negative, and neutral) based on its textual content.
+
+```{r}
+library(tm)
+library(e1071)
+library(SnowballC)
+library(caret)
+```
+
+
+## Data loading
+Previous cleaning of the training data was performed in Dataiku
+
+```{r load}
+path <- "D://Documentos//IE_MBD//Term2//Machine_Learning2//assignment3/"
+setwd(path)
+train_set <- read.csv(file="training_prepared_3.csv", header=TRUE, sep = ",")
+head(train_set)
+```
+
+## Data exploration
+We started by graphing the distribution of negative, neutral, and positive sentiment per airline. 
+Followed by discovering the number of missing values per column. 
+```{r explore, echo=FALSE}
+library(ggplot2)
+library(reshape)
+
+na.cols <- which(colSums(is.na(train_set)) > 0)
+sort(colSums(sapply(train_set[na.cols], is.na)), decreasing = TRUE)
+paste('There are', length(na.cols), 'columns with missing values')
+
+qplot(train_set[,"airline"], data=train_set, geom="bar",
+      fill=airline_sentiment) + 
+      theme(legend.position = "right") +
+      theme(axis.text.x=element_text(angle = -20, hjust = 0))+
+      ggtitle(paste("airline","by status_group"))
+
+table(train_set[,c("airline","airline_sentiment")])
+```
+
+Next, we plotted a timeseries for the negative sentiments per airline throughout the month. 
+```{r}
+library(reshape2)
+library(plyr)
+library(dplyr)
+
+negativeTweets <- train_set %>% filter(airline_sentiment=="negative")
+negativeTweetsByDateByAirline <- negativeTweets %>% group_by(airline,tweet_created_parsed_day) %>% dplyr::summarise(count = n())
+negativeTweetsByDateByAirlinePlot = ggplot() + geom_line(data=negativeTweetsByDateByAirline, aes(x=tweet_created_parsed_day, y=count, group =airline , color=airline)) 
+negativeTweetsByDateByAirlinePlot
+
+```
+
+## Data preparation
+Prior data preparation on the original training dataset was performed in Dataiku, and exported in a CSV format for modelling in R.
+In short the transformations applied to the dataset where:
+- Removing effect to right shift introduce by the incorrect interpretation of "," in the text variable as delimiters
+- Parsing the tweet_create variable to "date" type
+- Basic information on the "text" variable such as lenght, number of vowels, etc.
+
+## Modelling
+
+This part of the code combines a randomize technique applied to the original training dataset, after of which the "text" variable is processed to be transformed to a DocumentTermMatrix using the library "tm".
+(forked from practice_solution of lab5: SVM)
+
+```{r tm_ops}
+# Randomize the dataset to facilitate the training process
+set.seed(123)
+train_set <- train_set[sample(nrow(train_set)), ]
+train_set <- train_set[sample(nrow(train_set)), ]
+
+# Convert the target variable ('class') from character to factor.
+train_set$airline_sentiment <- as.factor(train_set$airline_sentiment)
+
+corpus <- Corpus(VectorSource(train_set$text))
+
+
+cleanCorpus <- function(corpus) {
+  corpus <-tm_map(corpus, stemDocument)
+  corpus.tmp <- tm_map(corpus,removePunctuation)
+  corpus.tmp <- tm_map(corpus.tmp,stripWhitespace)
+  #corpus.tmp <- tm_map(corpus.tmp,removeWords,stopwords("in"))
+  return(corpus.tmp)
+}
+
+corpus.clean <- cleanCorpus(corpus)
+
+dtm <- DocumentTermMatrix(corpus.clean,control = list(weighting= function(x) weightBin(x)))
+dtm <- removeSparseTerms(dtm, .99)
+
+dataset.train <- train_set[1:3500,]
+dataset.test <- train_set[3501:7000,]
+
+dtm.train <- dtm[1:3500,]
+dtm.test <- dtm[3501:7000,]
+
+corpus.clean.train <- corpus.clean[1:3500]
+corpus.clean.test <- corpus.clean[3501:7000]
+
+X <- as.matrix(dtm.train)
+y <- dataset.train$airline_sentiment
+
+training_data <- as.data.frame(cbind(y,X))
+test_data <- as.data.frame(as.matrix(dtm.test))
+
+```
+
+
+```{r svm}
+sv <- svm(y~., training_data, type="C-classification", kernel="sigmoid", cost=1)
+summary(sv)
+```
+
+```{r conf_mat}
+prediction <- predict(sv, test_data)
+table("Predictions"= prediction,  "Actual" = dataset.test$airline_sentiment )
+```
+```{r acc_func}
+acc <- function(table){
+  TP = table[1,1];  # true positives
+  TN = table[2,2];  # true negatives
+  FP = table[1,2];  # false positives
+  FN = table[2,1];  # false negatives
+  acc = (TP + TN)/(TP + TN + FP + FN)
+  return(acc)
+}
+acc(table("Predictions"= prediction,  "Actual" = dataset.test$airline_sentiment ))
+```
+
+```{r optimization}
+fitControl <- trainControl(method = "cv",
+                           number = 5,
+                           verboseIter = TRUE)
+
+cv.svm <- train(X,y,
+                method="svmRadial",
+                preProc = c("center", "scale"),
+                tuneLength = 5,
+                metric = "Accuracy",
+                trControl = fitControl)
+
+```
+
+```{r optimized_model}
+cv.svm.prediction <- predict(cv.svm, test_data)
+table("Predictions"= cv.svm.prediction,  
+      "Actual" = dataset.test$airline_sentiment )
+acc(table("Predictions"= cv.svm.prediction,  
+          "Actual" = dataset.test$airline_sentiment ))
+```
+
+
+## Prediction on test set
+Execute the class predictions on the DocumentTermMatrix generated from the test set and write down the resutls to submission file.
+
+!!! we were not able to debug the error on line 188 why the predict method does not accept the newdata even when keeping only those columns that were use during the training of the model !!!!
+```{r}
+test_set <- read.csv(file="test.csv", header=TRUE, sep = ",")
+corpus2 <- Corpus(VectorSource(test_set$text))
+
+corpus.clean2 <- cleanCorpus(corpus2)
+
+dtm2 <- DocumentTermMatrix(corpus.clean2,
+                          control = list(weighting = function(x) weightBin(x)))
+dtm2 <- removeSparseTerms(dtm2, .99)
+
+pred_data <- as.data.frame(as.matrix(dtm2))
+
+pred_data <- pred_data[ , which(names(pred_data) %in% names(test_data))]
+
+cv.svm.prediction_2 <- predict(cv.svm,
+                               newdata=pred_data)
+  
+final_df <- cbind(test_set$tweet_id, cv.svm.prediction_2)
+colnames(final_df) <- c("tweet_id","airline_sentiment")
+write.table(final_df, file = "submission_svm.csv",row.names=FALSE, na="",quote = FALSE,col.names=TRUE, sep=',')
+
+```
+
